@@ -15,6 +15,11 @@ The analysis was completed in R using a full data-analysis workflow:
 - DV_ProwiseLearn.Rmd – main RMarkdown analysis file
 - README.md – project description
 
+ ## How to view the report
+
+You can view the rendered report directly via GitHub Pages:
+https://vanessazyto.github.io/Data-Analysis-Visualisation-for-ProwiseLearn/index.html
+
 ## Technologies used
 - R, RMarkdown
 - tidyverse (dplyr, tidyr)
