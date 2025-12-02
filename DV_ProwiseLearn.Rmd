@@ -1,0 +1,731 @@
+---
+title: "Data Visualization Assignment 2"
+author: "Group 13: Vanessa Zyto, Aada Koivuniemi, Jiazhen Tang"
+date: "`r format(Sys.time(), '%Y-%m-%d %H:%M')`" # You must keep this line here
+output:
+  html_document:
+    toc: true
+    theme: flatly
+    # available themes: default; cerulean; journal; flatly; readable; spacelab; united; cosmo; lumen; paper; sandstone; simplex; yeti
+    df_print: paged
+    code_folding: hide # options: hide, show, none
+    number_sections: false # true for numbered section headings 
+---
+
+```{r 00-setup, include = FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE) # set default echo = TRUE for all code blocks
+rm(list = ls()) # Remove any existing objects in memory
+```
+
+```{r 00-requirements, include=FALSE}
+# load packages
+require(tidyverse)
+require(datasauRus)
+library(cowplot)
+library(tidyverse)
+library(oefenwebDatabase)
+library(ggtext)
+library(lintr)
+install.packages("oefenwebDatabase")
+```
+
+## Introduction
+
+Feedback plays a central role in learning. It helps students understand their mistakes, reflect on their progress, and adjust their strategies (Hattie & Timperley, 2007). However, not all students engage with feedback in the same way. Some may spend time processing the information carefully, while others may skip over it quickly  (Hattie & Timperley, 2007). Understanding how long students attend to feedback provides valuable insight into their learning behaviors and motivation.
+
+By examining feedback-looking time, the understanding of which students are more likely to engage deeply with feedback and which may need additional support to benefit from it is deepened. This knowledge is particularly valuable for teachers, who can use it to tailor instruction, encourage reflection, and identify students who might struggle to stay engaged with corrective feedback.
+
+Our project focuses on student, task, and behavioral characteristics that influence how long Dutch primary students look at feedback while using the educational games in Prowise Learn. While these findings may also be informative for developers at Prowise Learn e.g., to improve feedback design, our primary goal is to provide teacher-oriented insights into patterns of feedback engagement across different groups of students.
+
+To identify which factors most strongly influence how long students look at feedback, we modeled feedback-looking time as a function of student, task, and behavioral characteristics. 
+
+
+### Research Question
+
+**What are the most important students, task, and behavioural characteristics that predicts feedback looking time in Dutch primary students?**
+
+
+## Data & Exploratory Analysis
+
+```{r 01-load-data, include = FALSE}
+# Load data
+con <- oefenwebDatabase::connect()
+
+# For this RQ, it might be wise to start off with a subset of the
+# `mot_metrics_logs` table. You can run the code below to create a subset:
+
+# First retrieve all unique users in this table.
+# (We'll only look at data from domain sessions)
+unique_users <- get_query(
+  "SELECT DISTINCT user_id
+  FROM mot_metrics_logs
+  WHERE session = 'domain'",
+  con = con
+)
+# We pull all users
+set.seed(123)
+sample_users <-  unique_users %>%
+  pull(user_id)
+
+# Get the mot_metrics_logs data for the users sampled above
+logs_data <- get_query(
+  "SELECT *
+  FROM mot_metrics_logs
+  WHERE user_id IN ({sample_users*})
+  AND session = 'domain'",
+  con = con
+)
+
+# Check if no. of unique users in the data equals the no. of users we sampled
+length(unique(logs_data$user_id)) == length(sample_users)
+
+# Remove unnecessary objects
+rm(unique_users, sample_users)
+
+
+# The code below adds some variables from the `mot_metrics_domains` and the
+# `mot_metrics_users` tables to the `mot_metrics_logs` data.
+
+# Get mot_metrics_domains table
+domains <- get_query(
+  "SELECT *
+  FROM mot_metrics_domains",
+  con = con
+)
+
+# Get mot_metrics_users table (for information on gender)
+users <- get_query(
+  "SELECT user_id, gender
+  FROM mot_metrics_users",
+  con = con
+) %>%
+  # Some users are present more than once in the data due to being part of
+  # multiple school classes. Since we only need gender, remove duplicate rows
+  distinct(user_id, gender)
+
+# Delete correct responses from log records
+# (Because the system automatically moves on to the next item after a correct
+# response, there is no 'feedback looking time'.)
+logs_data <- logs_data %>%
+  filter(correct_answered == 0) %>%
+  # add variables from domains table
+  left_join(
+    dplyr::select(
+      domains,
+      c(domain_id, short_name, token, app, informative_feedback)
+    ),
+    by = "domain_id"
+  ) %>%
+  # add gender from users table
+  left_join(
+    users, by = "user_id"
+  )
+```
+
+### Data
+
+**Response variable**: `fb_looking_time` : duration (seconds) between the response and the start of the next item. When response was incorrect, out of time, or question-mark, the correct answer is shown. This variable can be used to see how long users look at this feedback. 
+
+**Predictor variables**:
+
+- `response_type`: Factor variable from the four different response types: correct = "cor", incorrect = "incor", question mark = "question_mark", out of time = "late". 
+
+- `grade`: Grade of user in Dutch education system.
+
+- `gender`: Male of female.
+
+- `difficulty`: Difficulty level:
+                0 — Easy: ~0.90 probability of a correct response.
+                1 — Medium: ~0.75 probability of a correct response.
+                2 — Hard: ~0.60 probability of a correct response.
+                
+- `new_user_domain_q_score`: Estimated user ability within the domain after the item was played. This is a numeric rating where the value maps to grade-equivalent level (within the domain): for example, 200 ≈ grade 2 skill, 500 ≈ grade 5 skill. Use this score to compare the user’s current proficiency to peers and expected grade-level benchmarks.
+
+- `show_coins`: Whether users see coins (1) or not (0).
+
+- `response_in_milliseconds`: The response time in milliseconds.
+
+- `app`: Language vs. Math.
+
+- `informative_feedback`: Whether the explicit feedback was provided for the item, which gives more information than right or wrong.
+
+
+### Preprocessing
+```{r}
+sum(is.na(logs_data$fb_looking_time))
+```
+
+There are 370869 missing variables in our response variable. These NA's correspond to trials with correct response or missing logs and thus we decide to remove the rows with NA's, as `fb_looking_time` is only meaningful when feedback was delivered.
+
+```{r}
+logs_data <- logs_data %>%
+  filter(!is.na(fb_looking_time))
+
+nrow(logs_data)
+```
+
+After data cleaning, we are left with 1344099 observations.
+
+```{r}
+summary(logs_data$fb_looking_time)
+```
+
+We can observe extreme values in `fb_looking_time`. The minimum is 0 seconds, likely representing accidental clicks, inattentive or perfunctory behavior and provides little information about feedback engagement. The maximum is 300 seconds, which is plausibly an outlier which might be likely caused by interruptions, tab switching, or participants leaving the session open.  Both extremes can distort summary statistics and models, so we should consider handling them based on context and downstream analysis needs.
+
+Let's have a look at the distribution of feedback looking time.
+
+```{r fig.align = "center"}
+base_plot <- ggplot(logs_data, aes(x = fb_looking_time)) +
+  geom_histogram(bins = 50, fill = "#2c7fb8", color = "white") +
+  theme_minimal(base_size = 5) +
+  labs(x = "Feedback Looking Time (seconds)", y = "Count")
+
+
+time_1 <- base_plot +
+  coord_cartesian(xlim = c(0, 20)) +
+  labs(title = "Distribution of Feedback Looking Time \n(Zoomed to 0–20s)")
+
+time_2 <- base_plot +
+  coord_cartesian(xlim = c(20, 50), ylim = c(0, 10000)) +
+  labs(title = "Distribution of Feedback Looking Time \n(Zoomed to 20–50s)")
+
+time_3 <- base_plot +
+  coord_cartesian(xlim = c(50, 300), ylim = c(0, 2000)) +
+  labs(title = "Distribution of Feedback Looking Time \n(Zoomed to 50–300s)")
+
+plot_grid(time_1, time_2, time_3, ncol = 3)
+```
+
+The histogram shows most fb_looking_time values under 100 seconds, with a strong right skew. Counts are highest at low duration and peak around ~5 seconds. There is a long, sparse tail to the right.
+
+We filter `fb_looking_time` to remove implausible values. We remove fb_looking_time <= .5 seconds and any negative values. These are not meaningful for engagement and likely indicate accidental clicks or logging errors. We also remove fb_looking_time > 120 seconds as the system is programmed to advance students after 120 seconds of feedback, so any larger values are implausible.
+
+
+```{r}
+logs_data <- logs_data %>%
+  filter(fb_looking_time > 0.5 & fb_looking_time < 120)
+```
+
+
+Next, we convert categorical fields from numeric/character to factor so R treats them as discrete categories in summaries and models.
+
+```{r}
+logs_data$grade <- as.factor(logs_data$grade)
+logs_data$gender <- as.factor(logs_data$gender)
+logs_data$app <- as.factor(logs_data$app)
+logs_data$response_type <- as.factor(logs_data$response_type)
+logs_data$informative_feedback <- as.factor(logs_data$informative_feedback)
+logs_data$difficulty <- as.factor(logs_data$difficulty)
+logs_data$correct_answered <- as.factor(logs_data$correct_answered)
+logs_data$show_coins <- as.factor(logs_data$show_coins)
+```
+
+Since `gender` has a lot of missing values and our focus is on understanding how student characteristics relate to feedback looking time, particularly for informing teachers, we remove rows with NA in gender. 
+
+```{r}
+data <- logs_data %>%
+  filter(!is.na(gender))
+```
+
+```{r}
+nrow(data)
+```
+Thus, for the final analysis we are left with 353759 observations.
+
+### Exploratory Data Analysis
+
+#### **Feedback Looking Time by Student Characteristics (Gender & Grade)**
+
+```{r}
+df_gender_grade <- data %>%
+  group_by(gender, grade) %>%
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+
+ggplot(df_gender_grade, aes(x = grade, y = mean_fb,
+                            color = gender, group = gender)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se), width = 0.2) +
+  theme_minimal() +
+  labs(title = "Interaction of Grade and Gender on Feedback Looking Time",
+       x = "Grade", y = "Mean Feedback Looking Time (seconds)") +
+  scale_color_manual(
+    name = "Student Gender",
+    labels = c("f" = "Female", "m" = "Male"),
+    values = c("f" = "#CC79A7", "m" = "#0072B2")
+  )
+```
+
+#### **Feedback Looking Time by Response Type (x Grade)**
+
+```{r}
+df_response_grade <- data %>%
+  group_by(response_type, grade) %>%
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_response_grade, aes(x = grade, y = mean_fb,
+                              color = response_type, group = response_type)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se), width = 0.2) +
+  theme_minimal() +
+  labs(
+       title = paste("Interaction of Grade and Response Type on",
+                     "Feedback Looking Time"),
+       x = "Grade", y = "Mean Feedback Looking Time (seconds)") +
+  scale_color_manual(
+    name = "Response Type",
+    labels = c("incor" = "Incorrect", "late" = "Late",
+               "question_mark" = "Question Mark"),
+    values = c("incor" = "#999999", "late" = "#56B4E9",
+               "question_mark" = "#009E73"),
+  )
+
+```
+
+#### **Feedback Looking Time by Response Type (x Gender)**
+```{r}
+df_response_gender <- data %>%
+  group_by(response_type, gender) %>%
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_response_gender, aes(x = gender, y = mean_fb, fill = response_type)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se),
+                position = position_dodge(0.9), width = 0.2) +
+  theme_minimal() +
+  labs(title = "Average Feedback Looking Time by Gender and Response Type",
+       x = "Gender", y = "Mean Feedback Looking Time (seconds)") +
+
+  scale_fill_manual(
+                    name = "Response Type",
+                    labels = c("incor" = "Incorrect", "late" = "Late",
+                               "question_mark" = "Question Mark"),
+                    values = c("incor" = "#999999", "late" = "#56B4E9",
+                               "question_mark" = "#009E73"))
+
+```
+
+#### **Feedback Looking Time by Application (x Grade)**
+```{r}
+df_app_grade <- data %>%
+  group_by(app, grade) %>%
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_app_grade, aes(x = grade, y = mean_fb, color = app, group = app)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se), width = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Interaction of Grade and Application on",
+                     "Feedback Looking Time"),
+       x = "Grade", y = "Mean Feedback Looking Time (seconds)") +
+  scale_color_manual(
+    name = "Application",
+    labels = c("Rekentuin" = "Rekentuin (Maths)",
+               "Taalzee" = "Taalzee (Language"),
+    values = c("Rekentuin" = "#F0E442", "Taalzee" = "#D55E00")
+  )
+
+```
+
+
+#### **Feedback Looking Time by Application (x Gender)**
+```{r}
+df_app_gender <- data %>%
+  group_by(app, gender) %>%
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_app_gender, aes(x = gender, y = mean_fb, fill = app)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se),
+                position = position_dodge(0.9), width = 0.2) +
+  theme_minimal() +
+  labs(title = "Average Feedback Looking Time by Application and Gender",
+       x = "Grade", y = "Mean Feedback Looking Time (seconds)") +
+  scale_fill_manual(
+                    name = "Application",
+                    labels = c("Rekentuin" = "Rekentuin (Maths)",
+                               "Taalzee" = "Taalzee (Language)"),
+                    values = c("Rekentuin" = "#F0E442", "Taalzee" = "#D55E00"))
+
+
+```
+
+
+#### **Feedback Looking Time by Coins Visibility (x Grade)**
+```{r}
+df_coins_grade <- data %>%
+  group_by(show_coins, grade) %>%
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_coins_grade, aes(x = grade, y = mean_fb,
+                           color = show_coins, group = show_coins)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se), width = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Interaction of Grade and Coin Visibility",
+                     "on Feedback Looking Time"),
+       x = "Grade", y = "Mean Feedback Looking Time (seconds)") +
+  scale_color_manual(
+    name = "Coin Visibility",
+    labels = c("0" = "No Coins", "1" = "Coins"),
+    values = c("0" = "#492050", "1" = "#BCDABC")
+  )
+```
+
+
+#### **Feedback Looking Time by Coins Visibility (x Gender)**
+```{r}
+df_coins_gender <- data %>%
+  group_by(show_coins, gender) %>%
+
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_coins_gender, aes(x = gender, y = mean_fb, fill = show_coins)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se),
+                position = position_dodge(0.9), width = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Average Feedback Looking Time For Visible",
+                     "and Invisible Coins by Gender"),
+       x = "Gender", y = "Mean Feedback Looking Time (seconds)") +
+  scale_fill_manual(
+    name = "Coin Visibility",
+    labels = c("0" = "No Coins", "1" = "Coins"),
+    values = c("0" = "#492050", "1" = "#BCDABC")
+  )
+
+```
+
+
+#### **Feedback Looking Time by Informative Feedback (x Grade)**
+
+```{r}
+df_if_grade <- data %>%
+  group_by(informative_feedback, grade) %>%
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_if_grade, aes(x = grade, y = mean_fb,
+                        color = informative_feedback,
+                        group = informative_feedback)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se), width = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Interaction of Grade and Informative Feedback",
+                     "on Feedback Looking Time"),
+       x = "Grade", y = "Mean Feedback Looking Time (seconds)") +
+  scale_color_manual(
+    name = "Informative Feedback",
+    labels = c("0" = "No Informative Feedback", "1" = "Informative Feedback"),
+    values = c("0" = "deeppink3", "1" = "darkblue")
+  )
+
+```
+
+
+#### **Feedback Looking Time by Informative Feedback (x Gender)**
+
+```{r}
+df_if_gender <- data %>%
+  group_by(informative_feedback, gender) %>%
+
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_if_gender, aes(x = gender, y = mean_fb,
+                         fill = informative_feedback)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se),
+                position = position_dodge(0.9), width = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Average Feedback Looking Time For Informative",
+                     "and Non-Informative Feedback by Gender"),
+       x = "Gender", y = "Mean Feedback Looking Time (seconds)") +
+  scale_fill_manual(
+    name = "Informative Feedback",
+    labels = c("0" = "Non-Informative Feedback", "1" = "Informative Feedback"),
+    values = c("0" = "deeppink3", "1" = "darkblue")
+  )
+```
+
+
+##### **Feedback Looking Time by Difficulty (x Grade)**
+```{r}
+df_difficulty_grade <- data %>%
+  group_by(difficulty, grade) %>%
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_difficulty_grade, aes(x = grade, y = mean_fb,
+                                color = difficulty, group = difficulty)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se), width = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Interaction of Grade and Difficulty",
+                     "on Feedback Looking Time"),
+       x = "Grade", y = "Mean Feedback Looking Time (seconds)") +
+  scale_color_manual(
+    name = "Difficulty",
+    labels = c("0" = "Easy", "1" = "Medium", "2" = "Hard"),
+    values = c("0" = "aquamarine3", "1" = "#E69F00", "2" = "brown1")
+  )
+
+```
+
+
+##### **Feedback Looking Time by Difficulty (x Gender)**
+```{r}
+df_difficulty_gender <- data %>%
+  group_by(difficulty, gender) %>%
+
+  summarise(mean_fb = mean(fb_looking_time, na.rm = TRUE),
+            se = sd(fb_looking_time, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop")
+
+ggplot(df_difficulty_gender, aes(x = gender, y = mean_fb, fill = difficulty)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_errorbar(aes(ymin = mean_fb - se, ymax = mean_fb + se),
+                position = position_dodge(0.9), width = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Average Feedback Looking Time For Difficulty",
+                     "by Gender"),
+       x = "Gender", y = "Mean Feedback Looking Time (seconds)") +
+  scale_fill_manual(
+    name = "Difficulty",
+    labels = c("0" = "Easy", "1" = "Medium", "2" = "Hard"),
+    values = c("0" = "aquamarine3", "1" = "#E69F00", "2" = "brown1")
+  )
+```
+
+**Our main observations based on EFA are**:
+
+- On average, girls tend to spend more time looking at feedback than boys.
+- There are differences in feedback looking time between different grades.
+- There is an interaction between grade and gender in feedback looking time. In lower grades, boys spend substantially more time looking at feedback than girls, but this pattern reverses as students get older.
+- There are some differences in feedback looking time by difficulty, response type, application and informative feedback.
+- There are some small interactions between grade and application, coin visibility and difficulty.
+
+
+## Modelling
+
+First, we decided to fit a model with all the variables we were interested in as all of them seemed to be predictive of feedback looking time based on EDA.
+
+```{r}
+model_basic <- lm(fb_looking_time ~ response_type + grade + gender +
+                    difficulty + new_user_domain_q_score + show_coins +
+                    response_in_milliseconds + app + informative_feedback,
+                  data = data)
+summary(model_basic)
+```
+
+The adjusted R-squared of this model is 0.78 meaning that the predictors included in the model explain around 7.8% of variance in feedback looking time. All but `response_typequestion_mark` and `grade2` predictors are significant.
+
+Next, we decided to add an interaction of grade and gender which was found in EDA.
+
+```{r}
+model_basic <- lm(fb_looking_time ~ gender + grade + response_type + app +
+                    show_coins + informative_feedback +
+                    response_in_milliseconds + new_user_domain_q_score +
+                    difficulty + grade * gender, data = data)
+summary(model_basic)
+```
+
+Our model's R2 increases slightly, but it doesn't seem as a meaningful difference. It only slightly increases explained variance, while increasing the complexity of the model more.
+
+Still, the models do not seem to be very predictive. There might be a few reasons for it. One of them is related to the distribution of the response variable `fb_looking_time`. Specifically, it is right-skewed. This means that most students have short feedback looking time, while a few have very long ones. This trend could be observed in EDA. In such cases, linear models which assume normally distributed residuals and homoscedasticity perform poorly (Field, 2024). This is because very long looking times disproportionately affect model fit and variance of errors tends to increase with the magnitude of the response variable causing heteroscedasticity. Therefore, two important assumptions of linear regression are violated.
+
+To address it, the `fb_looking_time` variable will be log-transformed. This transformation makes the distribution more symmetric and thus variance is more stable across fitted values, and it tends to linearize relationships between predictors and the dependent variable (Osborne, 2002).
+
+```{r}
+data <- data %>%
+  mutate(log_fb_looking_time = log(fb_looking_time))
+```
+
+```{r}
+log_model_b <- lm(log_fb_looking_time ~ gender + grade + response_type + app +
+                    show_coins + informative_feedback +
+                    response_in_milliseconds + new_user_domain_q_score +
+                    difficulty, data = data)
+
+summary(log_model_b)
+```
+
+The overall model was statistically significant, F(17,353741)=3627,p<.001, explaining approximately 14.8% of the variance in log-transformed feedback-looking time (adjusted R2 = .1484).
+
+We decided to try adding the interaction effect too.
+
+```{r}
+log_model <- lm(log_fb_looking_time ~ gender + grade + response_type +
+                  grade * gender + app + show_coins + informative_feedback +
+                  response_in_milliseconds + new_user_domain_q_score +
+                  difficulty, data = data)
+
+summary(log_model)
+```
+
+The model despite being statistically significant, doesn't explain significantly more variance. Therefore, we will stay with the basic log-transformed model as it balances the interpretability and explained variance.
+
+While the R2 (.1484) is moderate, this is quite typical for behavioral data with large individual variability. Still, it indicates that several variables meaningfully contribute to prediction of feedback-looking time.
+
+What is important is that the interpretation of β coefficients differ now from standard regression without using logs. A coefficient β corresponds to about a 100 × (exp(β) − 1)% change in the original time variable.
+
+
+## Final Visualization & Interpretation
+
+Below is the final visualization, showing how student, task, and behavioral characteristics predict feedback-looking time in Prowise Learn exercises. The visualization communicates how each predictor contributes to feedback looking time, expressed as percentage changes relative to the reference group (based on a multiple regression model), making comparisons across variables intuitive. The horizontal bar chart highlights which factors increase or decrease feedback-looking time most strongly, emphasizing the strongest predictors. The visualization aimed to allow for intuitive interpretation of complex regression output, being accessible for audiences such as teachers. 
+
+The main findings are summarized as follows. Students who responded late spent about 40% more time viewing feedback compared than those who responded incorrectly, while students completing language tasks spend 15% time on feedback than those doing math tasks. Students in higher grades (grade 3 to 8) looked at feedback for much shorter periods - around 50% less than first graders. Informative feedback, male gender, and higher task difficulty were also associated to slightly shorter viewing times. Overall, these variables together explained around 14% of the variance in feedback-looking time. The results suggest that feedback engagement is shaped by a combination of cognitive (e.g., task difficulty) and demographic (gender, grade) influences, supporting the idea that both student and contextual characteristics jointly affect how children process feedback.
+
+```{r}
+# obtain coefficient list & create a tibble
+coef <- coef(log_model_b)
+coef <- tibble(term = names(coef), coefficient = as.numeric(coef))
+
+# arrange coefficients and filter out the baseline
+coef <- coef %>%
+  arrange(desc(abs(coefficient))) %>%
+  filter(term != "(Intercept)")
+
+
+# creating easier to interpret labels
+labels <- c(
+            "genderm" = "Boy (vs. girl)",
+            "response_typelate" = "Late reponse (vs. incorrect response)",
+            "difficulty2" = "Hard difficulty (vs. easy)",
+            "appTaalzee" = "Language Task (vs. Math Task)",
+            "response_typequestion_mark" = " '?' response 
+            (vs. incorrect response)",
+            "show_coins1" = "Coins Visible (vs. No Coins Visible)",
+            "difficulty1" = "Medium difficulty (vs. easy)",
+            "new_user_domain_q_score" = "High user ability",
+            "response_in_milliseconds" = "Responded quickly",
+            "grade2" = "Grade 2 (vs. Grade 1)",
+            "grade3" = "Grade 3 (vs. Grade 1)",
+            "grade4" = "Grade 4 (vs. Grade 1)",
+            "grade5" = "Grade 5 (vs. Grade 1)",
+            "grade6" = "Grade 6 (vs. Grade 1)",
+            "grade7" = "Grade 7 (vs. Grade 1)",
+            "grade8" = "Grade 8 (vs. Grade 1)",
+            "informative_feedback1" = "Informative Feedback 
+            (vs. Non-informative)")
+
+# renaming the terms with the new labels and
+# transforming the log-second x-axis to a percentage change axis
+coef <- coef %>%
+  mutate(new_term = recode(term, !!!labels))
+
+# transforming coefficents into percentage changes
+coef_tbl <- coef %>%
+  mutate(perc_change = (exp(coefficient) - 1) * 100)
+```
+
+
+```{r fig.height = 8, fig.width = 16, fig.align = "center"}
+highlight_terms <- c("Late reponse (vs. incorrect response)",
+                     "Grade 6 (vs. Grade 1)",
+                     "Grade 7 (vs. Grade 1)",
+                     "Grade 8 (vs. Grade 1)",
+                     "Grade 5 (vs. Grade 1)",
+                     "Grade 4 (vs. Grade 1)",
+                     "Grade 3 (vs. Grade 1)")
+
+
+# setting up the highlighting as well as markdown features inside y-axis
+coef_tbl <- coef_tbl %>%
+  mutate(
+         perc_change = (exp(coefficient) - 1) * 100,
+         highlight = case_when(
+                               new_term %in% highlight_terms &
+                                 perc_change > 0 ~ "highlight_pos",
+                               new_term %in% highlight_terms &
+                                 perc_change <= 0 ~ "highlight_neg",
+                               perc_change > 0 ~ "pos",
+                               TRUE ~ "neg"),
+         # add <b>...</b> to the axis labels that should be bold
+         new_term_lbl = ifelse(new_term %in% highlight_terms,
+                               paste0("<b>", new_term, "</b>"),
+                               as.character(new_term))) %>%
+  arrange(perc_change) %>%
+  mutate(new_term_lbl = factor(new_term_lbl, levels = new_term_lbl,
+                               ordered = TRUE))
+
+# plotting the final visualization
+
+plot_final <- ggplot(coef_tbl, aes(x = new_term_lbl, y = perc_change,
+                                   fill = highlight)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%+.0f%%", perc_change),
+                hjust = ifelse(perc_change > 0, -0.1, 1.1)),
+            color = "black", size = 3.5) +
+  coord_flip() +
+  scale_fill_manual(
+                    values = c(
+                               "pos" = "#dde6ff",
+                               "neg" = "#ffc9c9",
+                               "highlight_pos" = "#2d53c2",
+                               "highlight_neg" = "firebrick"),
+                    breaks = c("highlight_pos", "highlight_neg"),
+                    labels = c("Longer feedback-looking time",
+                               "Shorter feedback-looking time"),
+                    name = "Direction of Effect") +
+  labs(
+       title = paste("Compared to first graders, older students spend about",
+                     "50% less time looking at feedback,\n while students who",
+                     "respond late spend about 40% more time than those who",
+                     "answer incorrectly.\n \n"),
+       x = "Predictors",
+       y = "Predicted impact on feedback looking time (%)") +
+  theme_minimal(base_size = 12) +
+  theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        axis.title.y = element_text(size = 16),
+        axis.title.x = element_text(size = 16),
+        axis.text.y = ggtext::element_markdown(size = 8, lineheight = 1.1),
+        axis.text.y.left = ggtext::element_markdown(size = 9,
+                                                    lineheight = 1.1),
+        legend.title = element_text(size = 12),
+        legend.text = element_text(size = 11)) +
+  geom_vline(xintercept = 0, color = "black", linewidth = 0.5) +
+  scale_y_continuous(
+                     limits = c(-55, 55),
+                     breaks = seq(-50, 50, 25))
+
+
+plot_final
+```
+
+
+```{r}
+oefenwebDatabase::close_connections()
+```
+
+References:
+
+Field, A. (2024). Discovering Statistics Using IBM SPSS Statistics (6th ed.). Sage Publications.
+
+Hattie, J., & Timperley, H. (2007). The Power of Feedback. Review of Educational Research, 77(1), 81–112. https://doi.org/10.3102/003465430298487
+
+Osborne, J. (2002). Notes on the Use of Data Transformations. Practical Assessment, Research & Evaluation. 8. 
